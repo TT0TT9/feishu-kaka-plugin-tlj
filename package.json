@@ -1,0 +1,17 @@
+{
+  "name": "feishu-bitable-plugin-longtext",
+  "version": "1.0.0",
+  "description": "长文本预览侧边栏插件",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "echo \"No build required, static files are ready in dist/\""
+  },
+  "keywords": [
+    "feishu",
+    "bitable",
+    "plugin"
+  ],
+  "author": "",
+  "license": "ISC"
+}

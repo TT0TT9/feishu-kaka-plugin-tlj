@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>长文本预览插件</title>
+    <!-- 引入 Markdown 渲染库 marked -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+    <style>
+        /* 基础变量定义，适配浅色和深色模式 */
+        :root {
+            --el-color-primary: rgb(20, 86, 240);
+            --el-bg-color: #fff;
+            --el-text-color-primary: #1f2329;
+            --el-text-color-regular: #646a73;
+            --el-border-color-lighter: #dee0e3;
+            --toolbar-bg: #f8f9fa;
+            --empty-text-color: #8f959e;
+            --float-bg: rgba(31, 35, 41, 0.8);
+            --float-text: #fff;
+            --font-size-main: 14px;
+        }
+
+        [data-theme="DARK"] {
+            --el-color-primary: #4571e1;
+            --el-bg-color: #252525;
+            --el-text-color-primary: #f0f0f0;
+            --el-text-color-regular: #c9c9c9;
+            --el-border-color-lighter: #434343;
+            --toolbar-bg: #1e1e1e;
+            --empty-text-color: #5c5f66;
+            --float-bg: rgba(255, 255, 255, 0.8);
+            --float-text: #000;
+        }
+
+        /* 飞书官方要求字体 */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Tahoma, "PingFang SC", "Microsoft Yahei", Arial, "Hiragino Sans GB", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+            background-color: var(--el-bg-color);
+            color: var(--el-text-color-primary);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+            transition: background-color 0.3s, color 0.3s;
+        }
+
+        /* 顶部工具栏 */
+        .toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 10px; /* 增加内边距，让内部元素有呼吸感 */
+            background-color: var(--el-bg-color);
+            border-radius: 6px;
+            margin: 6px 6px 4px 6px; /* 保持外部紧凑不变 */
+            flex-shrink: 0;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* 渐变外边框复用类 */
+        .gradient-border::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border-radius: 6px;
+            padding: 2px; /* 边框粗细 */
+            background: linear-gradient(90deg, #1456f0, #00e5e5);
+            -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            -webkit-mask-composite: xor;
+            mask-composite: exclude;
+            z-index: -1;
+            pointer-events: none;
+        }
+        
+        .toolbar-left {
+            display: flex;
+            align-items: center;
+            gap: 4px; /* 缩小元素间距 */
+            flex: 1;
+            min-width: 0;
+        }
+        
+        .toolbar-right {
+            display: flex;
+            align-items: center;
+            gap: 4px; /* 缩小元素间距 */
+            flex-shrink: 0;
+        }
+
+        /* 工具栏组件基础样式 */
+        .btn-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px; /* 进一步缩小按钮本身 */
+            height: 22px; /* 进一步缩小按钮本身，留出上下留白 */
+            border: 1px solid #d2d6db;
+            border-radius: 4px;
+            background-color: var(--el-bg-color);
+            color: #1f2329;
+            cursor: pointer;
+            outline: none;
+            transition: all 0.2s;
+            padding: 0;
+            font-size: 13px; /* 缩小图标字号配合小按钮 */
+            box-sizing: border-box;
+            font-weight: bold;
+        }
+
+        select.font-select {
+            width: 28px; /* 字号下拉框稍微宽一点点，因为里面有数字 */
+            height: 22px; /* 和图标按钮高度完全一致 */
+            padding: 0;
+            border: 1px solid #d2d6db;
+            border-radius: 4px;
+            background-color: var(--el-bg-color);
+            color: #1f2329;
+            font-size: 12px; /* 字体随之缩小 */
+            font-weight: bold;
+            cursor: pointer;
+            outline: none;
+            appearance: none;
+            text-align: center;
+            box-sizing: border-box;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* MD 切换按钮状态 */
+        .btn-icon.md-btn {
+            font-weight: 800;
+            font-size: 12px; /* 和其他字体一起缩小 */
+            color: #5c5f66; /* 深灰色 */
+            width: 28px; /* 稍宽一点 */
+        }
+        
+        .btn-icon.md-active {
+            border-color: #d2d6db;
+            background-color: #f5f6f7;
+            color: #1f2329; /* 激活时颜色变深 */
+        }
+
+        /* 搜索框区域 */
+        .search-area {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 1; /* 占据 toolbar-left 剩余的全部空间 */
+            min-width: 0;
+        }
+
+        .search-box-wrapper {
+            position: relative;
+            display: flex;
+            flex: 1; /* 每个输入框均分剩下的宽度 */
+            min-width: 0; /* 允许输入框缩小到极窄而不撑破父级 */
+        }
+
+        .search-input {
+            padding: 0 16px 0 6px; 
+            height: 22px; /* 和按钮一样矮 */
+            border-radius: 4px;
+            background-color: var(--el-bg-color);
+            color: var(--el-text-color-primary);
+            font-size: 12px; /* 输入框字号也随之缩小 */
+            width: 100%;
+            box-sizing: border-box;
+            font-weight: bold;
+        }
+
+        .search-input:focus {
+            outline: none; /* 移除选中变宽，因为已经是均分的 */
+        }
+        
+        .search-input::placeholder {
+            color: #bbbfc4;
+            font-weight: normal;
+        }
+
+        .clear-btn {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            cursor: pointer;
+            font-size: 14px;
+            color: #8f959e;
+            display: none;
+            background: transparent;
+            font-weight: bold;
+        }
+
+        .search-box-wrapper.has-value .clear-btn {
+            display: inline;
+        }
+
+        /* 搜索框颜色标识 (边框颜色) - 默认 1px 浅色 */
+        .search-box-wrapper[data-color="red"] .search-input { border: 1px solid rgba(245, 74, 69, 0.5); color: #f54a45; }
+        .search-box-wrapper[data-color="yellow"] .search-input { border: 1px solid rgba(240, 163, 47, 0.5); color: #f0a32f; }
+        .search-box-wrapper[data-color="blue"] .search-input { border: 1px solid rgba(51, 112, 255, 0.5); color: #3370ff; }
+        .search-box-wrapper[data-color="green"] .search-input { border: 1px solid rgba(52, 199, 89, 0.5); color: #34c759; }
+        .search-box-wrapper[data-color="purple"] .search-input { border: 1px solid rgba(111, 66, 193, 0.5); color: #6f42c1; }
+
+        /* 搜索框悬停/聚焦状态 - 发光 */
+        .search-box-wrapper[data-color="red"] .search-input:hover, .search-box-wrapper[data-color="red"] .search-input:focus { border-color: #f54a45; box-shadow: 0 0 0 2px rgba(245, 74, 69, 0.2); }
+        .search-box-wrapper[data-color="yellow"] .search-input:hover, .search-box-wrapper[data-color="yellow"] .search-input:focus { border-color: #f0a32f; box-shadow: 0 0 0 2px rgba(240, 163, 47, 0.2); }
+        .search-box-wrapper[data-color="blue"] .search-input:hover, .search-box-wrapper[data-color="blue"] .search-input:focus { border-color: #3370ff; box-shadow: 0 0 0 2px rgba(51, 112, 255, 0.2); }
+        .search-box-wrapper[data-color="green"] .search-input:hover, .search-box-wrapper[data-color="green"] .search-input:focus { border-color: #34c759; box-shadow: 0 0 0 2px rgba(52, 199, 89, 0.2); }
+        .search-box-wrapper[data-color="purple"] .search-input:hover, .search-box-wrapper[data-color="purple"] .search-input:focus { border-color: #6f42c1; box-shadow: 0 0 0 2px rgba(111, 66, 193, 0.2); }
+
+        /* 搜索框有内容状态 - 2px 粗边框 */
+        .search-box-wrapper.has-value[data-color="red"] .search-input { border: 2px solid #f54a45; box-shadow: none; }
+        .search-box-wrapper.has-value[data-color="yellow"] .search-input { border: 2px solid #f0a32f; box-shadow: none; }
+        .search-box-wrapper.has-value[data-color="blue"] .search-input { border: 2px solid #3370ff; box-shadow: none; }
+        .search-box-wrapper.has-value[data-color="green"] .search-input { border: 2px solid #34c759; box-shadow: none; }
+        .search-box-wrapper.has-value[data-color="purple"] .search-input { border: 2px solid #6f42c1; box-shadow: none; }
+
+        .search-divider {
+            color: #d2d6db;
+            font-size: 14px;
+            margin: 0 2px;
+            cursor: pointer;
+            padding: 4px;
+            display: flex;
+            align-items: center;
+            border-radius: 4px;
+            transition: background-color 0.2s, transform 0.3s;
+        }
+
+        .search-divider:hover {
+            background-color: #f5f6f7;
+        }
+        
+        .search-divider.expanded {
+            transform: rotate(180deg);
+        }
+
+        /* 复制按钮状态 */
+        .btn-icon.copy-success {
+            background-color: #28a745;
+            color: white;
+            border-color: #28a745;
+            animation: bounce 0.3s;
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        /* 刷新按钮动画：只旋转内部的 i 图标，外框不动 */
+        .btn-icon.refreshing i {
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
+
+        @keyframes spin {
+            100% { transform: rotate(360deg); }
+        }
+        mark.hl-red { background-color: rgba(245, 74, 69, 0.4); color: inherit; }
+        mark.hl-yellow { background-color: rgba(240, 163, 47, 0.4); color: inherit; }
+        mark.hl-blue { background-color: rgba(51, 112, 255, 0.4); color: inherit; }
+        mark.hl-green { background-color: rgba(52, 199, 89, 0.4); color: inherit; }
+        mark.hl-purple { background-color: rgba(111, 66, 193, 0.4); color: inherit; }
+
+        /* 内容区 */
+        .content-area-wrapper {
+            flex: 1;
+            margin: 0 6px 6px 6px; /* 严格对齐顶部缩小的外边距 */
+            padding: 2px; /* 留给外层渐变边框的空间 */
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            z-index: 1;
+            border-radius: 6px; /* 配合顶部调整 */
+        }
+
+        .content-area {
+            flex: 1;
+            padding: 10px; /* 稍微压缩内部正文边距 */
+            overflow-y: auto;
+            position: relative;
+            font-size: var(--font-size-main);
+            line-height: 1.6;
+            background-color: var(--el-bg-color);
+            border-radius: 4px;
+        }
+
+        /* 原生文本预览 */
+        .raw-text {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            word-break: break-all;
+            margin: 0;
+        }
+
+        /* 空状态 */
+        .empty-state {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--empty-text-color);
+            font-size: 14px;
+            text-align: center;
+            flex-direction: column;
+        }
+
+        /* 悬浮统计窗 */
+        .float-stats {
+            position: absolute; /* 相对 content-area-wrapper 定位 */
+            bottom: 12px;
+            right: 12px;
+            background-color: #8f959e; /* 纯正的高级灰 */
+            color: #fff;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            display: none;
+            z-index: 100;
+            pointer-events: none;
+        }
+        .float-stats.show {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .stat-value {
+            color: #b3c9ff; /* 更高对比度的亮蓝色，在灰色背景上更清晰 */
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 顶部工具栏 (预备状态，默认展示) -->
+    <div class="toolbar gradient-border" id="toolbar">
+        <div class="toolbar-left">
+            <!-- MD 切换开关 (已换为双箭头图标) -->
+            <button id="mdToggleBtn" class="btn-icon md-btn" title="开启/关闭 Markdown 解析">
+                MD
+            </button>
+
+            <!-- 搜索区 -->
+            <div class="search-area" id="searchArea">
+                <div class="search-box-wrapper" data-color="red">
+                    <input type="text" class="search-input hl-input" data-hl="red" placeholder="Aa">
+                    <span class="clear-btn">×</span>
+                </div>
+                <div class="search-box-wrapper" data-color="yellow">
+                    <input type="text" class="search-input hl-input" data-hl="yellow" placeholder="Aa">
+                    <span class="clear-btn">×</span>
+                </div>
+                <div class="search-box-wrapper" data-color="blue">
+                    <input type="text" class="search-input hl-input" data-hl="blue" placeholder="Aa">
+                    <span class="clear-btn">×</span>
+                </div>
+                
+                <!-- 隐藏的绿、紫搜索框 -->
+                <div class="search-box-wrapper extra-search" data-color="green" style="display: none;">
+                    <input type="text" class="search-input hl-input" data-hl="green" placeholder="Aa">
+                    <span class="clear-btn">×</span>
+                </div>
+                <div class="search-box-wrapper extra-search" data-color="purple" style="display: none;">
+                    <input type="text" class="search-input hl-input" data-hl="purple" placeholder="Aa">
+                    <span class="clear-btn">×</span>
+                </div>
+
+                <!-- 向右展开箭头 (按钮) 始终在所有输入框的最右侧 -->
+                <div id="expandSearchBtn" class="search-divider" title="展开/收起颜色"><i class="ri-arrow-right-s-line"></i></div>
+            </div>
+        </div>
+
+        <div class="toolbar-right">
+
+            <!-- 字号切换 -->
+            <select id="fontSizeSelect" class="font-select">
+                <option value="12px">12</option>
+                <option value="14px" selected>14</option>
+                <option value="16px">16</option>
+                <option value="18px">18</option>
+                <option value="20px">20</option>
+            </select>
+
+            <!-- 一键复制 -->
+            <button id="copyBtn" class="btn-icon" title="一键复制"><i class="ri-file-copy-line"></i></button>
+
+            <!-- 手动刷新 -->
+            <button id="refreshBtn" class="btn-icon" title="重新获取数据"><i class="ri-refresh-line"></i></button>
+        </div>
+    </div>
+
+    <!-- 内容展示区 -->
+    <div id="debugLog" style="background: #ffe6e6; color: red; padding: 10px; display: none; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow-y: auto;"></div>
+    <div class="content-area-wrapper gradient-border">
+        <div class="content-area" id="contentArea">
+            <div class="empty-state" id="emptyState">
+                <div>请在多维表格中点击一个具体的单元格...</div>
+            </div>
+            <div id="textContainer" style="display: none;"></div>
+        </div>
+        <!-- 底部悬浮统计窗，移入 wrapper 内以保证绝对定位对齐边缘 -->
+        <div class="float-stats" id="floatStats">
+            <div class="stat-item" id="statTotal">总字数: <span class="stat-value">0</span></div>
+            <div class="stat-item" id="statSelect" style="display: none;">选中: <span class="stat-value">0</span></div>
+        </div>
+    </div>
+
+    <script>
+        // 全局错误捕获
+        window.addEventListener('error', function(e) {
+            const debugLog = document.getElementById('debugLog');
+            if(debugLog) {
+                debugLog.style.display = 'block';
+                debugLog.textContent += `Error: ${e.message}\n${e.filename}:${e.lineno}\n`;
+            }
+        });
+        window.addEventListener('unhandledrejection', function(e) {
+            const debugLog = document.getElementById('debugLog');
+            if(debugLog) {
+                debugLog.style.display = 'block';
+                debugLog.textContent += `Promise Rejection: ${e.reason}\n`;
+            }
+        });
+    </script>
+
+    <script type="module">
+        import { bitable } from "https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk@1.0.2/dist/index.mjs";
+
+        // ==========================================
+        // 第一部分：获取页面上的 HTML 元素 (DOM 元素引用)
+        // ==========================================
+        const contentArea = document.getElementById('contentArea'); // 整个文本展示区域
+        const emptyState = document.getElementById('emptyState');   // 未选中单元格时的"空状态"提示
+        const textContainer = document.getElementById('textContainer'); // 实际存放文字的容器
+        const toolbar = document.getElementById('toolbar');         // 顶部的工具栏
+        const fontSizeSelect = document.getElementById('fontSizeSelect'); // 调整字号的下拉菜单
+        const mdToggleBtn = document.getElementById('mdToggleBtn'); // Markdown 模式切换按钮
+        const copyBtn = document.getElementById('copyBtn');         // 复制按钮
+        const refreshBtn = document.getElementById('refreshBtn');   // 刷新按钮
+        const expandSearchBtn = document.getElementById('expandSearchBtn'); // 展开/收起更多搜索框的按钮
+        const hlInputs = document.querySelectorAll('.hl-input');    // 所有的搜索输入框 (NodeList)
+        const clearBtns = document.querySelectorAll('.clear-btn');  // 搜索框里的清除 "x" 按钮
+        
+        // 底部悬浮统计窗的元素
+        const floatStats = document.getElementById('floatStats');   // 整个统计黑底白字的框
+        const statTotal = document.getElementById('statTotal');     // 显示总字数的地方
+        const statSelect = document.getElementById('statSelect');   // 显示选中字数的地方
+
+        // ==========================================
+        // 第二部分：定义全局变量 (记住当前插件的状态)
+        // ==========================================
+        let currentRawText = ''; // 当前单元格里最原始的文本内容
+        let isMdMode = false;    // 当前是否开启了 Markdown 解析模式（默认关闭）
+        let hlKeywords = { red: '', yellow: '', blue: '', green: '', purple: '' }; // 记录5个搜索框里用户输入的关键字
+        let currentRecordId = null; // 当前选中的是哪一行 (Record)
+        let currentFieldId = null;  // 当前选中的是哪一列 (Field)
+        let currentTableId = null;  // 当前选中的是哪一个数据表 (Table)
+
+        // ==========================================
+        // 第三部分：初始化插件与飞书的连接 (核心逻辑)
+        // ==========================================
+        async function init() {
+            // 检查飞书官方 SDK 是否加载成功
+            if (!bitable) {
+                console.error("未检测到 bitable SDK");
+                const debugLog = document.getElementById('debugLog');
+                debugLog.style.display = 'block';
+                debugLog.textContent += "未检测到 bitable SDK\n";
+                return;
+            }
+
+            // 1. 初始化主题（适配飞书客户端的深色/浅色模式）
+            try {
+                const theme = await bitable.bridge.getTheme(); // 获取当前主题
+                document.documentElement.setAttribute('data-theme', theme); // 设置给 HTML 标签，CSS 会根据这个变色
+            } catch (e) { console.warn("获取主题失败", e); }
+
+            // 监听主题变化（如果用户在飞书里切换了深浅色，插件跟着变）
+            bitable.bridge.onThemeChange((event) => {
+                document.documentElement.setAttribute('data-theme', event.data.theme);
+            });
+
+            // 2. 【核心】监听用户在多维表格里点击了哪个单元格
+            bitable.base.onSelectionChange(async (event) => {
+                const selection = event.data; // 获取选中的位置信息
+                
+                // 确保用户确实选中了一个具体的单元格 (表、行、列都有值)
+                if (selection && selection.recordId && selection.fieldId && selection.tableId) {
+                    // 把选中的位置存起来，方便后面刷新用
+                    currentRecordId = selection.recordId;
+                    currentFieldId = selection.fieldId;
+                    currentTableId = selection.tableId;
+                    // 去拉取这个单元格里的文字数据
+                    await loadCellData(selection.tableId, selection.recordId, selection.fieldId);
+                } else {
+                    // 如果用户点到了空白处，显示"空状态"提示
+                    showEmpty();
+                }
+            });
+
+            // 3. 插件刚打开时，主动去问一下当前用户有没有选中单元格
+            try {
+                const selection = await bitable.base.getSelection();
+                if (selection && selection.recordId && selection.fieldId && selection.tableId) {
+                    currentRecordId = selection.recordId;
+                    currentFieldId = selection.fieldId;
+                    currentTableId = selection.tableId;
+                    await loadCellData(selection.tableId, selection.recordId, selection.fieldId);
+                }
+            } catch (e) {
+                // 如果报错了，把错误信息显示出来方便排查
+                currentRawText = `初始化 getSelection 失败: ${e.message}\n${e.stack}`;
+                renderContent();
+                showContent();
+            }
+            
+            // 4. 给页面上的所有按钮绑定点击事件
+            bindEvents();
+        }
+
+        // ==========================================
+        // 第四部分：从飞书拉取真实数据
+        // ==========================================
+        async function loadCellData(tableId, recordId, fieldId) {
+            try {
+                // 根据 ID 获取对应的表和列
+                const table = await bitable.base.getTableById(tableId);
+                const field = await table.getFieldById(fieldId);
+                
+                // 提取列名 (原本这里是用来获取坐标的，现在只用来备用)
+                let posStr = '-';
+                try {
+                    const fieldMeta = await table.getFieldMetaById(fieldId);
+                    posStr = `列: ${fieldMeta.name}`;
+                } catch(e) {}
+                
+                // 获取单元格的具体内容
+                let cellValue = await field.getValue(recordId);
+                
+                // 飞书的单元格格式很多样（纯文本、带格式的段落、多选标签等），我们需要统一转成普通字符串
+                let textContent = '';
+                if (cellValue) {
+                    if (typeof cellValue === 'string') {
+                        textContent = cellValue; // 已经是纯文本了
+                    } else if (Array.isArray(cellValue)) {
+                        // 处理段落结构数据（富文本），把每一段的文字拼起来
+                        textContent = cellValue.map(v => v.text || '').join('');
+                    } else if (typeof cellValue === 'object') {
+                        // 处理单选/多选等对象类型
+                        textContent = cellValue.text || JSON.stringify(cellValue);
+                    } else {
+                        // 兜底：强转成字符串
+                        textContent = String(cellValue);
+                    }
+                }
+                
+                // 把提取好的纯文本存起来
+                currentRawText = textContent;
+                // 开始渲染 (生成 HTML 并处理高亮)
+                renderContent();
+                
+                // 更新右下角的字数统计
+                updateStats(currentRawText);
+                // 切换到内容展示页面
+                showContent();
+            } catch (error) {
+                console.error("加载单元格数据失败", error);
+                currentRawText = `加载失败: ${error.message}`;
+                renderContent();
+                showContent();
+            }
+        }
+
+        // ==========================================
+        // 第五部分：核心渲染引擎 (把文字变成带样式的 HTML)
+        // ==========================================
+        function renderContent() {
+            let htmlContent = '';
+            
+            // 1. 如果开启了 MD (Markdown) 模式，就用外部的 marked 库把文本转成漂亮的排版
+            if (isMdMode && marked) {
+                htmlContent = marked.parse(currentRawText);
+            } else {
+                // 原生模式下，为了防止特殊字符(如 < >)变成真实的 HTML 代码导致错乱或被攻击(XSS)，
+                // 我们创建一个虚拟的 div，把文字当做 textContent 塞进去，让浏览器自动转义
+                const div = document.createElement('div');
+                div.className = 'raw-text'; // 这个 class 保证了回车换行能正常显示
+                div.textContent = currentRawText;
+                htmlContent = div.outerHTML;
+            }
+
+            // 2. 杀手级功能：五色多线程关键字高亮
+            // 检查是不是至少有一个搜索框输入了内容
+            let hasHighlight = Object.values(hlKeywords).some(v => v.trim() !== '');
+            if (hasHighlight) {
+                // 为了不破坏原有的 HTML 标签(比如加粗 <b> 标签里的 'b' 不应该被高亮替换掉)，
+                // 我们需要去一层层遍历真实的 DOM 树
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = htmlContent;
+                
+                highlightDOM(tempDiv); // 递归高亮替换
+                htmlContent = tempDiv.innerHTML;
+            }
+
+            // 最后，把处理好的带高亮的 HTML 代码，塞回页面显示区域
+            textContainer.innerHTML = htmlContent;
+        }
+        
+        // 专门用来遍历 HTML 结构并给文字打高亮标记的函数
+        function highlightDOM(element) {
+            // 拿到当前元素的所有子节点 (可能是标签，也可能是纯文本)
+            const childNodes = Array.from(element.childNodes);
+            for (let node of childNodes) {
+                // 如果是纯文本节点，我们才去处理它
+                if (node.nodeType === Node.TEXT_NODE) {
+                    let text = node.textContent;
+                    let replaced = false; // 标记是否被高亮替换了
+                    
+                    let wrapper = document.createElement('span');
+                    // 先把纯文本转义，防止破坏后续的 HTML
+                    let currentHtml = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    
+                    // 循环 5 个颜色的关键字，如果匹配到，就用 <mark> 标签包起来
+                    for (const [color, keyword] of Object.entries(hlKeywords)) {
+                        const kw = keyword.trim();
+                        if (!kw) continue;
+                        replaced = true;
+                        
+                        // 对关键字里的正则特殊符号进行转义，防止用户输入 [ 等符号报错
+                        const escapedKw = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        // 创建全局忽略大小写的正则进行替换，并加上对应颜色的 CSS class
+                        const regex = new RegExp(`(${escapedKw})`, 'gi');
+                        currentHtml = currentHtml.replace(regex, `<mark class="hl-${color}">$1</mark>`);
+                    }
+                    
+                    // 如果发生了替换，就把原来的纯文本节点替换成带有 <mark> 的 HTML 结构
+                    if (replaced) {
+                        wrapper.innerHTML = currentHtml;
+                        element.replaceChild(wrapper, node);
+                    }
+                } 
+                // 如果是 HTML 标签节点，且不是我们刚加的 <mark> 标签，就继续往里钻(递归)
+                else if (node.nodeType === Node.ELEMENT_NODE && node.nodeName !== 'MARK') {
+                    highlightDOM(node);
+                }
+            }
+        }
+
+        // ==========================================
+        // 第六部分：界面状态切换辅助函数
+        // ==========================================
+        // 显示空状态 (没选单元格时)
+        function showEmpty() {
+            emptyState.style.display = 'flex';
+            textContainer.style.display = 'none';
+            floatStats.classList.remove('show'); // 隐藏悬浮字数统计
+            currentRawText = '';
+            
+            // 注意：现在我们保留 toolbar(工具栏) 的显示，因为用户要求"啥不点也要有东西，处于预备状态"
+            // toolbar.style.display = 'none'; 
+        }
+
+        // 显示文本内容状态
+        function showContent() {
+            emptyState.style.display = 'none';
+            textContainer.style.display = 'block';
+            floatStats.classList.add('show'); // 显示字数统计
+            toolbar.style.display = 'flex';
+        }
+
+        // 计算字数统计
+        function updateStats(text) {
+            // 飞书里的换行符可能会多出不可见的 \r，为了准确我们要把它删掉再数长度
+            const cleanText = text.replace(/\r/g, '');
+            statTotal.innerHTML = `总字数: <span class="stat-value">${cleanText.length}</span>`;
+        }
+
+        // ==========================================
+        // 第七部分：绑定用户操作事件
+        // ==========================================
+        function bindEvents() {
+            // 1. 监听字号切换：修改 CSS 里的变量，整个页面的字号就会跟着变
+            fontSizeSelect.addEventListener('change', (e) => {
+                document.documentElement.style.setProperty('--font-size-main', e.target.value);
+            });
+
+            // 2. 监听 MD 按钮点击：切换开关状态，重新渲染页面
+            mdToggleBtn.addEventListener('click', () => {
+                isMdMode = !isMdMode; // 状态取反
+                mdToggleBtn.classList.toggle('md-active', isMdMode); // 变色
+                renderContent();
+            });
+
+            // 3. 监听展开搜索框的箭头点击
+            expandSearchBtn.addEventListener('click', () => {
+                const extraInputs = document.querySelectorAll('.extra-search'); // 找到隐藏的绿、紫框
+                const isHidden = extraInputs[0].style.display === 'none'; // 看看当前是不是藏着的
+                
+                // 切换显示状态
+                extraInputs.forEach(el => {
+                    el.style.display = isHidden ? 'flex' : 'none';
+                });
+                
+                // 切换箭头的方向 (通过 CSS 的 rotate)
+                if(isHidden) {
+                    expandSearchBtn.classList.add('expanded');
+                } else {
+                    expandSearchBtn.classList.remove('expanded');
+                }
+            });
+
+            // 4. 监听所有搜索框的输入事件，做到"边打字边高亮"
+            hlInputs.forEach(input => {
+                input.addEventListener('input', (e) => {
+                    const color = e.target.dataset.hl; // 获取这个框代表什么颜色
+                    const val = e.target.value;        // 获取用户输入的文字
+                    hlKeywords[color] = val;           // 存到全局变量里
+                    
+                    // 控制输入框里的清除按钮 "x" 是否显示，并且控制边框加粗
+                    const wrapper = e.target.closest('.search-box-wrapper');
+                    if (val) {
+                        wrapper.classList.add('has-value'); // 有内容就加个 class，CSS 会让它边框变粗
+                    } else {
+                        wrapper.classList.remove('has-value');
+                    }
+                    
+                    renderContent(); // 重新渲染页面执行高亮
+                });
+            });
+
+            // 5. 监听清除按钮的点击：点击后清空对应的搜索框
+            clearBtns.forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const wrapper = e.target.closest('.search-box-wrapper'); // 找到父级框
+                    const input = wrapper.querySelector('.hl-input'); // 找到输入框
+                    input.value = ''; // 清空内容
+                    input.dispatchEvent(new Event('input')); // 告诉浏览器"内容变了"，触发上面第4步的高亮更新
+                });
+            });
+
+            // 6. 监听手动刷新按钮：点击后重新去飞书拉取一次数据
+            refreshBtn.addEventListener('click', async () => {
+                // 如果当前什么都没选，就不刷新
+                if (!currentRecordId || !currentFieldId || !currentTableId) return;
+                
+                refreshBtn.classList.add('refreshing'); // 加个 class，让图标转圈圈
+                await loadCellData(currentTableId, currentRecordId, currentFieldId); // 拉数据
+                // 强制转半秒钟，即使数据拉得很快，也能让用户看到刷新的动画反馈
+                setTimeout(() => {
+                    refreshBtn.classList.remove('refreshing');
+                }, 500); 
+            });
+
+            // 7. 增强版内容复制功能：一键复制当前所有的文字
+            copyBtn.addEventListener('click', () => {
+                const textToCopy = currentRawText; // 拿到当前展示的纯文本
+                if (!textToCopy) return; // 如果没文字就算了
+
+                // 复制成功后的 UI 表现：变成绿色的对勾
+                const onSuccess = () => {
+                    copyBtn.innerHTML = '<i class="ri-check-line"></i>';
+                    copyBtn.classList.add('copy-success');
+                    setTimeout(() => {
+                        copyBtn.innerHTML = '<i class="ri-file-copy-line"></i>'; // 1.5秒后变回原样
+                        copyBtn.classList.remove('copy-success');
+                    }, 1500);
+                };
+
+                // 复制失败后的 UI 表现：帮用户全选文字，提示他们手动复制
+                const onFail = () => {
+                    alert('系统限制了复制功能，已为您全选文本，请按 Ctrl+C / Cmd+C 复制。');
+                    const range = document.createRange();
+                    range.selectNodeContents(textContainer);
+                    const sel = window.getSelection();
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                };
+
+                // 尝试用现代浏览器的剪贴板 API (navigator.clipboard) 进行复制
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(textToCopy).then(onSuccess).catch(() => fallbackCopy(textToCopy, onSuccess, onFail));
+                } else {
+                    // 如果环境不支持，走备用方案 (fallbackCopy)
+                    fallbackCopy(textToCopy, onSuccess, onFail);
+                }
+            });
+
+            // 8. 监听用户的鼠标划选动作，统计选中了多少个字
+            document.addEventListener('selectionchange', () => {
+                const selection = window.getSelection();
+                const selectedText = selection.toString();
+                // 如果选中了文字，就显示在右下角的统计窗里
+                if (selectedText && selectedText.length > 0) {
+                    statSelect.style.display = 'flex';
+                    statSelect.innerHTML = `选中: <span class="stat-value">${selectedText.length}</span>`;
+                } else {
+                    // 没选或者取消了，就隐藏
+                    statSelect.style.display = 'none';
+                }
+            });
+        }
+
+        // ==========================================
+        // 第八部分：备用复制方案 (老式浏览器的兼容处理)
+        // ==========================================
+        function fallbackCopy(text, onSuccess, onFail) {
+            try {
+                // 悄悄创建一个不可见的输入框
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                textArea.style.position = "fixed";
+                textArea.style.left = "-999999px";
+                textArea.style.top = "-999999px";
+                document.body.appendChild(textArea);
+                
+                // 选中它里面的内容并执行复制命令
+                textArea.focus();
+                textArea.select();
+                const successful = document.execCommand('copy');
+                
+                // 用完就删掉
+                document.body.removeChild(textArea);
+                
+                if (successful) {
+                    onSuccess();
+                } else {
+                    onFail();
+                }
+            } catch (err) {
+                onFail();
+            }
+        }
+
+        // ==========================================
+        // 第九部分：程序的入口，启动！
+        // ==========================================
+        init().catch(e => {
+            currentRawText = `Init Error: ${e.message}\n${e.stack}`;
+            renderContent();
+            showContent();
+        });
+
+    </script>
+</body>
+</html>
