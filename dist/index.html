@@ -6,6 +6,11 @@
     <title>长文本预览插件</title>
     <!-- 引入 Markdown 渲染库 marked -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 引入 KaTeX 公式渲染库 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/mhchem.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
     <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
     <style>
         /* 基础变量定义，适配浅色和深色模式 */
@@ -434,6 +439,24 @@
                 debugLog.textContent += `Promise Rejection: ${e.reason}\n`;
             }
         });
+        
+        // 全局函数：调用飞书原生预览
+        window.previewFile = async function(token) {
+            if (token && window._globalBitable) {
+                try {
+                    // Let's dump what's in bitable.ui and bitable.bridge
+                    let uiKeys = window._globalBitable.ui ? Object.keys(window._globalBitable.ui).join(', ') : 'null';
+                    let bridgeKeys = window._globalBitable.bridge ? Object.keys(window._globalBitable.bridge).join(', ') : 'null';
+                    let bitableKeys = Object.keys(window._globalBitable).join(', ');
+                    
+                    alert("UI Keys: " + uiKeys + "\nBridge Keys: " + bridgeKeys + "\nBitable Keys: " + bitableKeys);
+                } catch (e) {
+                    alert("调用飞书预览失败: " + e.message);
+                }
+            } else {
+                alert("无法获取文件 Token，或者飞书接口未就绪。");
+            }
+        };
     </script>
 
     <script type="module">
@@ -463,6 +486,7 @@
         // 第二部分：定义全局变量 (记住当前插件的状态)
         // ==========================================
         let currentRawText = ''; // 当前单元格里最原始的文本内容
+        let currentAttachmentHtml = ''; // 当前如果是附件，存放附件的 HTML
         let isMdMode = false;    // 当前是否开启了 Markdown 解析模式（默认关闭）
         let hlKeywords = { red: '', yellow: '', blue: '', green: '', purple: '' }; // 记录5个搜索框里用户输入的关键字
         let currentRecordId = null; // 当前选中的是哪一行 (Record)
@@ -481,6 +505,9 @@
                 debugLog.textContent += "未检测到 bitable SDK\n";
                 return;
             }
+            
+            // 挂载到全局供原生 HTML 按钮调用
+            window._globalBitable = bitable;
 
             // 1. 初始化主题（适配飞书客户端的深色/浅色模式）
             try {
@@ -539,36 +566,103 @@
                 // 根据 ID 获取对应的表和列
                 const table = await bitable.base.getTableById(tableId);
                 const field = await table.getFieldById(fieldId);
+                const fieldMeta = await table.getFieldMetaById(fieldId);
                 
                 // 提取列名 (原本这里是用来获取坐标的，现在只用来备用)
                 let posStr = '-';
                 try {
-                    const fieldMeta = await table.getFieldMetaById(fieldId);
                     posStr = `列: ${fieldMeta.name}`;
                 } catch(e) {}
                 
                 // 获取单元格的具体内容
                 let cellValue = await field.getValue(recordId);
                 
-                // 飞书的单元格格式很多样（纯文本、带格式的段落、多选标签等），我们需要统一转成普通字符串
-                let textContent = '';
-                if (cellValue) {
-                    if (typeof cellValue === 'string') {
-                        textContent = cellValue; // 已经是纯文本了
-                    } else if (Array.isArray(cellValue)) {
-                        // 处理段落结构数据（富文本），把每一段的文字拼起来
-                        textContent = cellValue.map(v => v.text || '').join('');
-                    } else if (typeof cellValue === 'object') {
-                        // 处理单选/多选等对象类型
-                        textContent = cellValue.text || JSON.stringify(cellValue);
-                    } else {
-                        // 兜底：强转成字符串
-                        textContent = String(cellValue);
+                currentAttachmentHtml = '';
+                currentRawText = '';
+                
+                // 飞书的列类型 type: 17 是附件列。但由于引用列(查找引用)等情况，
+                // 我们直接通过数据结构特征来兜底判断是不是附件对象。
+                const isAttachment = fieldMeta.type === 17 || 
+                                     (Array.isArray(cellValue) && cellValue.length > 0 && cellValue[0].hasOwnProperty('file_token'));
+
+                if (isAttachment && cellValue && Array.isArray(cellValue)) {
+                    // 是附件列
+                    try {
+                        let html = '<div class="attachment-list" style="display:flex; flex-direction:column; gap:16px;">';
+                        
+                        for (let idx = 0; idx < cellValue.length; idx++) {
+                            const file = cellValue[idx];
+                            const name = file.name || '未知文件';
+                            const token = file.file_token || file.token || '';
+                            const type = file.type || '';
+                            let url = '';
+                            
+                            try {
+                                // 核心修复：如果是引用列，直接拿 url 会报 REQUEST_BIZ_ERROR。
+                                // 我们需要利用飞书底层给的 permission 追溯到最原始的那张表去拿 url！
+                                if (file.permission && file.permission.tableId && window._globalBitable) {
+                                    const origTable = await window._globalBitable.base.getTableById(file.permission.tableId);
+                                    const urls = await origTable.getCellAttachmentUrls([token], file.permission.fieldId, file.permission.recordId);
+                                    if (urls && urls.length > 0) url = urls[0];
+                                } else if (field.getAttachmentUrls) {
+                                    // 普通附件列的常规拿法
+                                    const urls = await field.getAttachmentUrls(recordId);
+                                    if (urls && urls.length > idx) url = urls[idx];
+                                }
+                            } catch (e) {
+                                console.warn('获取单张附件 URL 失败', e);
+                            }
+
+                            if (url) {
+                                if (type.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(name)) {
+                                    html += `<div style="border:1px solid var(--el-border-color-lighter); border-radius:6px; padding:8px; text-align:center; background:var(--toolbar-bg);"><img src="${url}" style="max-width:100%; max-height:400px; object-fit:contain; border-radius:4px;"><div style="margin-top:8px; font-size:12px; color:var(--el-text-color-regular);">${name}</div></div>`;
+                                } else if (type === 'application/pdf' || /\.pdf$/i.test(name)) {
+                                    html += `<div style="border:1px solid var(--el-border-color-lighter); border-radius:6px; padding:8px; background:var(--toolbar-bg);"><iframe src="${url}" style="width:100%; height:500px; border:none; border-radius:4px;"></iframe><div style="margin-top:8px; font-size:12px; color:var(--el-text-color-regular); text-align:center;">${name}</div></div>`;
+                                } else {
+                                    html += `<div style="border:1px solid var(--el-border-color-lighter); border-radius:6px; padding:16px; background:var(--toolbar-bg); display:flex; align-items:center; gap:8px;"><i class="ri-file-3-line" style="font-size:24px; color:var(--el-color-primary);"></i><a href="${url}" target="_blank" style="color:var(--el-text-color-primary); text-decoration:none; font-weight:bold; flex:1; word-break:break-all;">${name}</a><a href="${url}" target="_blank" style="color:var(--el-color-primary); font-size:12px; background:transparent; border:1px solid var(--el-color-primary); padding:4px 8px; border-radius:4px;">点击下载/预览</a></div>`;
+                                }
+                            } else {
+                                // 如果实在拿不到 URL（比如权限极高），给出友好的提示而不是报错
+                                html += `
+                                <div style="border:1px dashed #ff4d4f; border-radius:6px; padding:16px; background:#fff2f0; display:flex; align-items:center; gap:12px;">
+                                    <i class="ri-error-warning-line" style="font-size:24px; color:#ff4d4f;"></i>
+                                    <div style="flex:1; min-width:0;">
+                                        <div style="color:#cf1322; font-weight:bold; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${name}</div>
+                                        <div style="color:#cf1322; font-size:12px; margin-top:4px;">由于飞书安全限制，引用过来的附件无法直接预览，请回到原数据表查看。</div>
+                                    </div>
+                                </div>`;
+                            }
+                        }
+                        
+                        html += '</div>';
+                        currentAttachmentHtml = html;
+                        currentRawText = cellValue.map(f => f.name).join(', ');
+                    } catch (e) {
+                        console.error("处理附件展示失败", e);
+                        currentAttachmentHtml = `<div style="color:red; padding:10px; border:1px solid red; border-radius:4px;">解析附件失败: ${e.message}</div>`;
+                        currentRawText = '附件解析失败';
                     }
+                } else {
+                    // 飞书的单元格格式很多样（纯文本、带格式的段落、多选标签等），我们需要统一转成普通字符串
+                    let textContent = '';
+                    if (cellValue) {
+                        if (typeof cellValue === 'string') {
+                            textContent = cellValue; // 已经是纯文本了
+                        } else if (Array.isArray(cellValue)) {
+                            // 处理段落结构数据（富文本），把每一段的文字拼起来
+                            // 如果富文本里有行内图片（type === 'url' 或者 type === 'image'），尝试展示占位符
+                            textContent = cellValue.map(v => v.text || v.name || '').join('');
+                        } else if (typeof cellValue === 'object') {
+                            // 处理单选/多选等对象类型
+                            textContent = cellValue.text || cellValue.name || JSON.stringify(cellValue);
+                        } else {
+                            // 兜底：强转成字符串
+                            textContent = String(cellValue);
+                        }
+                    }
+                    currentRawText = textContent;
                 }
                 
-                // 把提取好的纯文本存起来
-                currentRawText = textContent;
                 // 开始渲染 (生成 HTML 并处理高亮)
                 renderContent();
                 
@@ -590,67 +684,168 @@
         function renderContent() {
             let htmlContent = '';
             
-            // 1. 如果开启了 MD (Markdown) 模式，就用外部的 marked 库把文本转成漂亮的排版
-            if (isMdMode && marked) {
-                htmlContent = marked.parse(currentRawText);
+            if (currentAttachmentHtml) {
+                // 如果当前选中的是附件（图片/文档），直接展示生成的附件 HTML
+                htmlContent = currentAttachmentHtml;
             } else {
-                // 原生模式下，为了防止特殊字符(如 < >)变成真实的 HTML 代码导致错乱或被攻击(XSS)，
-                // 我们创建一个虚拟的 div，把文字当做 textContent 塞进去，让浏览器自动转义
-                const div = document.createElement('div');
-                div.className = 'raw-text'; // 这个 class 保证了回车换行能正常显示
-                div.textContent = currentRawText;
-                htmlContent = div.outerHTML;
+                // 第一步：只做最轻量级的表格兼容替换
+                let tempText = currentRawText;
+                tempText = tempText.replace(/\\begin\{tabular\}/g, '\\begin{array}');
+                tempText = tempText.replace(/\\end\{tabular\}/g, '\\end{array}');
+
+                // 强制给未包裹的 array 加上 $$，并去掉内部的回车，否则 KaTeX 会因为换行而断开解析
+                tempText = tempText.replace(/\\begin\{array\}([\s\S]*?)\\end\{array\}/g, (match) => {
+                    let cleaned = match.replace(/\r?\n|\r/g, ' ');
+                    if (!cleaned.startsWith('$$') && !cleaned.startsWith('$')) {
+                        cleaned = '$$' + cleaned + '$$';
+                    }
+                    return cleaned;
+                });
+
+                // 第二步：渲染为 HTML
+                if (isMdMode && window.marked) {
+                    // 如果用 MD 模式，为了防止公式里的下划线 _ 和星号 * 被误转为斜体
+                    // 我们用最简单安全的临时替换法
+                    const mathBlocks = [];
+                    tempText = tempText.replace(/(\$\$[\s\S]*?\$\$|\$[^$]*?\$)/g, (match) => {
+                        mathBlocks.push(match);
+                        return `___MATH_BLOCK_${mathBlocks.length - 1}___`;
+                    });
+                    
+                    htmlContent = marked.parse(tempText);
+                    
+                    htmlContent = htmlContent.replace(/___MATH_BLOCK_(\d+)___/g, (match, p1) => {
+                        return mathBlocks[p1];
+                    });
+                } else {
+                    // 原生模式：直接转义并替换换行为 <br>
+                    htmlContent = tempText
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#039;')
+                        .replace(/\r?\n/g, '<br>');
+                    htmlContent = `<div class="raw-text">${htmlContent}</div>`;
+                }
             }
 
-            // 2. 杀手级功能：五色多线程关键字高亮
+            // 先把基础文本塞回页面显示区域
+            textContainer.innerHTML = htmlContent;
+
+            // 3. 调用 KaTeX 自动渲染数学公式 (寻找 $...$ 和 $$...$$)
+            if (window.renderMathInElement) {
+                try {
+                    renderMathInElement(textContainer, {
+                        delimiters: [
+                            {left: '$$', right: '$$', display: true},
+                            {left: '$', right: '$', display: false},
+                            {left: '\\(', right: '\\)', display: false},
+                            {left: '\\[', right: '\\]', display: true}
+                        ],
+                        throwOnError: false, // 遇到语法错误不抛出异常，而是原文显示
+                        output: 'html', // 只输出 HTML，不输出 MathML (防止被高亮重复匹配)
+                        strict: false,
+                        trust: true,
+                        macros: {
+                            "\\ce": "\\mathrm{#1}" // 提供一个简单的兜底宏，防止 mhchem 未加载时 \ce 报错
+                        }
+                    });
+                } catch(e) {
+                    console.error("公式渲染出错", e);
+                }
+            }
+
+            // 4. 杀手级功能：五色多线程关键字高亮 (在公式渲染完成后进行)
             // 检查是不是至少有一个搜索框输入了内容
             let hasHighlight = Object.values(hlKeywords).some(v => v.trim() !== '');
             if (hasHighlight) {
-                // 为了不破坏原有的 HTML 标签(比如加粗 <b> 标签里的 'b' 不应该被高亮替换掉)，
-                // 我们需要去一层层遍历真实的 DOM 树
-                const tempDiv = document.createElement('div');
-                tempDiv.innerHTML = htmlContent;
-                
-                highlightDOM(tempDiv); // 递归高亮替换
-                htmlContent = tempDiv.innerHTML;
+                // 直接在真实 DOM 上进行遍历高亮，并且跳过已经被 KaTeX 渲染成公式的节点
+                highlightDOM(textContainer); 
             }
-
-            // 最后，把处理好的带高亮的 HTML 代码，塞回页面显示区域
-            textContainer.innerHTML = htmlContent;
         }
         
         // 专门用来遍历 HTML 结构并给文字打高亮标记的函数
         function highlightDOM(element) {
+            // 如果这个节点属于 KaTeX 公式内部，直接跳过！绝不能破坏公式的结构！
+            if (element.classList && (element.classList.contains('katex') || element.classList.contains('katex-display'))) {
+                return;
+            }
+            // 防御性跳过：如果元素本身包含 math 相关类名或属性，直接跳过
+            if (element.classList && element.classList.contains('math')) {
+                return;
+            }
+
             // 拿到当前元素的所有子节点 (可能是标签，也可能是纯文本)
             const childNodes = Array.from(element.childNodes);
             for (let node of childNodes) {
                 // 如果是纯文本节点，我们才去处理它
                 if (node.nodeType === Node.TEXT_NODE) {
                     let text = node.textContent;
-                    let replaced = false; // 标记是否被高亮替换了
+                    if (!text.trim()) continue; // 跳过空文本
                     
-                    let wrapper = document.createElement('span');
-                    // 先把纯文本转义，防止破坏后续的 HTML
-                    let currentHtml = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                    
-                    // 循环 5 个颜色的关键字，如果匹配到，就用 <mark> 标签包起来
+                    // 构建高亮关键字数组
+                    const activeKeywords = [];
                     for (const [color, keyword] of Object.entries(hlKeywords)) {
                         const kw = keyword.trim();
-                        if (!kw) continue;
-                        replaced = true;
-                        
-                        // 对关键字里的正则特殊符号进行转义，防止用户输入 [ 等符号报错
-                        const escapedKw = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                        // 创建全局忽略大小写的正则进行替换，并加上对应颜色的 CSS class
-                        const regex = new RegExp(`(${escapedKw})`, 'gi');
-                        currentHtml = currentHtml.replace(regex, `<mark class="hl-${color}">$1</mark>`);
+                        if (kw) activeKeywords.push({ color, kw });
                     }
                     
-                    // 如果发生了替换，就把原来的纯文本节点替换成带有 <mark> 的 HTML 结构
-                    if (replaced) {
-                        wrapper.innerHTML = currentHtml;
-                        element.replaceChild(wrapper, node);
+                    if (activeKeywords.length === 0) continue;
+
+                    // 为了避免HTML注入冲突，我们需要找出所有匹配的位置，然后一次性切割文本
+                    let matches = [];
+                    activeKeywords.forEach(({color, kw}) => {
+                        const escapedKw = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        const regex = new RegExp(`(${escapedKw})`, 'gi');
+                        let match;
+                        while ((match = regex.exec(text)) !== null) {
+                            matches.push({
+                                start: match.index,
+                                end: match.index + match[0].length,
+                                color: color,
+                                text: match[0]
+                            });
+                        }
+                    });
+
+                    if (matches.length === 0) continue;
+
+                    // 解决多个关键字重叠的问题 (比如 "ERR" 和 "R" 重叠)，保留较长的那个或者先匹配的那个
+                    matches.sort((a, b) => a.start - b.start || b.end - a.end);
+                    let filteredMatches = [];
+                    let lastEnd = 0;
+                    for (let match of matches) {
+                        if (match.start >= lastEnd) {
+                            filteredMatches.push(match);
+                            lastEnd = match.end;
+                        }
                     }
+
+                    // 根据匹配位置切割文本并组装新的 DOM 节点
+                    const fragment = document.createDocumentFragment();
+                    let cursor = 0;
+                    
+                    for (let match of filteredMatches) {
+                        // 插入匹配之前的纯文本
+                        if (match.start > cursor) {
+                            fragment.appendChild(document.createTextNode(text.substring(cursor, match.start)));
+                        }
+                        // 插入高亮的 HTML 节点
+                        const mark = document.createElement('mark');
+                        mark.className = `hl-${match.color}`;
+                        mark.textContent = match.text;
+                        fragment.appendChild(mark);
+                        cursor = match.end;
+                    }
+                    
+                    // 插入最后剩余的纯文本
+                    if (cursor < text.length) {
+                        fragment.appendChild(document.createTextNode(text.substring(cursor)));
+                    }
+                    
+                    // 替换原来的文本节点
+                    element.replaceChild(fragment, node);
                 } 
                 // 如果是 HTML 标签节点，且不是我们刚加的 <mark> 标签，就继续往里钻(递归)
                 else if (node.nodeType === Node.ELEMENT_NODE && node.nodeName !== 'MARK') {
